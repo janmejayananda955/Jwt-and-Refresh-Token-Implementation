@@ -14,7 +14,9 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -59,12 +61,14 @@ public class AuthService {
         refreshTokenRepository.save(savedRefreshToken);
 
         // set in cookie
-        Cookie cookie = new Cookie("refreshToken", refreshToken);
-        cookie.setHttpOnly(false);
-        cookie.setSecure(true);
-        cookie.setPath("/");
-        cookie.setMaxAge(60 * 60 * 24 * 7); // 7 days
-        response.addCookie(cookie);
+        ResponseCookie cookie = ResponseCookie.from("refreshToken", refreshToken)
+                .httpOnly(true)
+                .secure(false) // set to false for local development over HTTP
+                .path("/")
+                .maxAge(60 * 60 * 24 * 7) // 7 days
+                .sameSite("Lax")
+                .build();
+        response.addHeader(HttpHeaders.SET_COOKIE, cookie.toString());
 
         return new AuthResponseDto("Login success", accessToken, refreshToken);
     }
@@ -84,36 +88,44 @@ public class AuthService {
     }
 
     public Object refreshToken(HttpServletRequest request) {
-        String refreshToken = null;
-        Cookie[] cookies = request.getCookies();
-        if (cookies != null) {
-            for (Cookie cookie : cookies) {
-                if (cookie.getName().equals("refreshToken")) {
-                    refreshToken = cookie.getValue();
+        try {
+            String refreshToken = null;
+            Cookie[] cookies = request.getCookies();
+            if (cookies != null) {
+                for (Cookie cookie : cookies) {
+                    if (cookie.getName().equals("refreshToken")) {
+                        refreshToken = cookie.getValue();
+                    }
                 }
             }
-        }
-        if (refreshToken == null) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .body("Refresh token missing");
-        }
-        String username = authUtil.getUserFromToken(refreshToken);
-        RefreshToken savedToken = refreshTokenRepository.findByToken(refreshToken).orElseThrow(() -> new RuntimeException("Token not found"));
+            if (refreshToken == null) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                        .body(Map.of("message", "Refresh token missing from cookies"));
+            }
+            
+            String username = authUtil.getUserFromToken(refreshToken);
+            RefreshToken savedToken = refreshTokenRepository.findByToken(refreshToken)
+                    .orElseThrow(() -> new RuntimeException("Token not found in database"));
 
-        if (savedToken.getRevoked()) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .body("Token revoked");
-        }
-        if (savedToken.getExpiresAt().isBefore(LocalDateTime.now())) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .body("Token expired");
-        }
+            if (savedToken.getRevoked()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                        .body(Map.of("message", "Refresh token is revoked"));
+            }
+            if (savedToken.getExpiresAt().isBefore(LocalDateTime.now())) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                        .body(Map.of("message", "Refresh token is expired"));
+            }
 
-        User user = userRepository.findByEmail(username).orElseThrow();
-        CustomUserDetails userDetails = new CustomUserDetails(user);
-        String newAccessToken = authUtil.generateAccessToken(userDetails);
+            User user = userRepository.findByEmail(username)
+                    .orElseThrow(() -> new RuntimeException("User not found"));
+            CustomUserDetails userDetails = new CustomUserDetails(user);
+            String newAccessToken = authUtil.generateAccessToken(userDetails);
 
-        return ResponseEntity.ok(Map.of("accessToken", newAccessToken));
+            return ResponseEntity.ok(Map.of("accessToken", newAccessToken));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("message", "Invalid refresh token: " + e.getMessage()));
+        }
     }
 
     public Object logout(HttpServletRequest request, HttpServletResponse response) {
@@ -129,16 +141,18 @@ public class AuthService {
                                 refreshToken.setRevoked(true);
                                 refreshTokenRepository.save(refreshToken);
                             });
-                    Cookie deleteCookie = new Cookie("refreshToken", null);
-                    deleteCookie.setHttpOnly(true);
-                    deleteCookie.setSecure(false);
-                    deleteCookie.setPath("/");
-                    deleteCookie.setMaxAge(0);
-
-                    response.addCookie(deleteCookie);
+                    
+                    ResponseCookie deleteCookie = ResponseCookie.from("refreshToken", "")
+                            .httpOnly(true)
+                            .secure(false)
+                            .path("/")
+                            .maxAge(0)
+                            .sameSite("Lax")
+                            .build();
+                    response.addHeader(HttpHeaders.SET_COOKIE, deleteCookie.toString());
                 }
             }
         }
-        return ResponseEntity.ok("Logout successful");
+        return ResponseEntity.ok(Map.of("message", "Logout successful"));
     }
 }
